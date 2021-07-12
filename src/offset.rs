@@ -1,10 +1,17 @@
-use std::{fmt::{Debug, Display}, sync::{Arc, Mutex}};
+use std::{
+    fmt::{Debug, Display},
+    sync::{Arc, Mutex},
+};
 
 use itertools::Itertools;
 use linreg::linear_regression_of;
 use measure_time::*;
 
-use crate::{bbox::GyroData, optic_flow::{OpticFlowData, OpticFlowRotation, read_optic_flow_data}, util::ransac};
+use crate::{
+    bbox::GyroData,
+    optic_flow::{read_optic_flow_data, OpticFlowData, OpticFlowRotation},
+    util::ransac,
+};
 
 #[derive(Default, Clone, Copy)]
 pub struct EstimatedOffset {
@@ -15,7 +22,11 @@ pub struct EstimatedOffset {
 
 impl Display for EstimatedOffset {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} at {} with cost of {:.04}", self.offset, self.at_video_ts, self.cost)
+        write!(
+            f,
+            "{} at {} with cost of {:.04}",
+            self.offset, self.at_video_ts, self.cost
+        )
     }
 }
 
@@ -38,10 +49,11 @@ pub struct LinearOffsetMapper {
 
 impl LinearOffsetMapper {
     pub fn from_offsets(offsets: &[EstimatedOffset]) -> Self {
-        let (k, b): (f64, f64) = linreg::linear_regression_of(&offsets.iter().map(|o| o.offset_at_video_ts()).collect_vec()).unwrap();
-        Self {
-            k, b
-        }
+        let (k, b): (f64, f64) = linreg::linear_regression_of(
+            &offsets.iter().map(|o| o.offset_at_video_ts()).collect_vec(),
+        )
+        .unwrap();
+        Self { k, b }
     }
 
     pub fn bbox_ts_at_video_ts(&self, video_ts: f64) -> f64 {
@@ -62,7 +74,7 @@ pub struct InterpolatingOffsetMapper {
 impl InterpolatingOffsetMapper {
     pub fn from_offsets(offsets: &[EstimatedOffset]) -> Self {
         Self {
-            offsets: offsets.iter().map(|o| o.offset_at_video_ts()).collect_vec()
+            offsets: offsets.iter().map(|o| o.offset_at_video_ts()).collect_vec(),
         }
     }
 
@@ -90,35 +102,60 @@ impl InterpolatingOffsetMapper {
 }
 
 pub fn offset_inliers(offsets: &[EstimatedOffset], inlier_prob: f64) -> Vec<EstimatedOffset> {
-    let mask = ransac(&offsets, inlier_prob, 0.9999, |model: [EstimatedOffset; 2], vs: &[EstimatedOffset], mask: &mut [bool]| {
+    let mask = ransac(
+        &offsets,
+        inlier_prob,
+        0.9999,
+        |model: [EstimatedOffset; 2], vs: &[EstimatedOffset], mask: &mut [bool]| {
+            let (k, b): (f64, f64) = linear_regression_of(&[
+                (model[0].at_video_ts, model[0].offset),
+                (model[1].at_video_ts, model[1].offset),
+            ])
+            .unwrap();
 
-        let (k, b): (f64, f64) = linear_regression_of(&[(model[0].at_video_ts, model[0].offset), (model[1].at_video_ts, model[1].offset)]).unwrap();
-
-        let x_center = (model[0].at_video_ts + model[1].at_video_ts) / 2.0;
-        const MAX_OFFSET_DEVIATION_PER_SECOND: f64 = 0.001;
-        let mut score = 0.0;
-        for (ix, offset) in vs.iter().enumerate() {
-            let expected_y = k * offset.at_video_ts + b;
-            let error = expected_y - offset.offset;
-            if error.abs() < (offset.at_video_ts - x_center).abs() * MAX_OFFSET_DEVIATION_PER_SECOND {
-                score += 1.0;
-                mask[ix] = true;
+            let x_center = (model[0].at_video_ts + model[1].at_video_ts) / 2.0;
+            const MAX_OFFSET_DEVIATION_PER_SECOND: f64 = 0.001;
+            let mut score = 0.0;
+            for (ix, offset) in vs.iter().enumerate() {
+                let expected_y = k * offset.at_video_ts + b;
+                let error = expected_y - offset.offset;
+                if error.abs()
+                    < (offset.at_video_ts - x_center).abs() * MAX_OFFSET_DEVIATION_PER_SECOND
+                {
+                    score += 1.0;
+                    mask[ix] = true;
+                }
             }
-        }
 
-        score
-    });
+            score
+        },
+    );
 
-    offsets.iter().copied().zip(mask.iter().copied()).filter_map(|(o, inlier)| if inlier { Some(o) } else { None }).collect()
+    offsets
+        .iter()
+        .copied()
+        .zip(mask.iter().copied())
+        .filter_map(|(o, inlier)| if inlier { Some(o) } else { None })
+        .collect()
 }
 
-
-pub fn find_offset_at_frame_full_bbox<'a, 'b>(frame_rotation: &Arc<Mutex<OpticFlowRotation>>, bbox: &'b GyroData, angle: f64, fps: f64, video_ts: f64, frames: usize) -> EstimatedOffset {
-    println!("find_offset_at_frame(.., .., {}, {}, {}, {}", angle, fps, video_ts, frames);
+pub fn find_offset_at_frame_full_bbox<'a, 'b>(
+    frame_rotation: &Arc<Mutex<OpticFlowRotation>>,
+    bbox: &'b GyroData,
+    angle: f64,
+    fps: f64,
+    video_ts: f64,
+    frames: usize,
+) -> EstimatedOffset {
     let center_frame = (video_ts * fps).round() as usize;
     let of = {
         debug_time!("read_optic_flow_data");
-        read_optic_flow_data(&mut frame_rotation.lock().unwrap(), bbox.timestep, center_frame - frames / 2, frames)
+        read_optic_flow_data(
+            &mut frame_rotation.lock().unwrap(),
+            bbox.timestep,
+            center_frame - frames / 2,
+            frames,
+        )
     };
 
     let bbox = bbox.with_camera_angle(angle);
@@ -135,15 +172,30 @@ pub fn find_offset_at_frame_full_bbox<'a, 'b>(frame_rotation: &Arc<Mutex<OpticFl
     }
 }
 
-pub fn find_offset_at_frame<'a, 'b>(frame_rotation: &Arc<Mutex<OpticFlowRotation>>, bbox: &'b GyroData, angle: f64, fps: f64, video_ts: f64, frames: usize, center_bbox_ts: f64, bbox_length: f64) -> EstimatedOffset {
-    println!("find_offset_at_frame(.., .., {}, {}, {}, {}, {}, {}", angle, fps, video_ts, frames, center_bbox_ts, bbox_length);
+pub fn find_offset_at_frame<'a, 'b>(
+    frame_rotation: &Arc<Mutex<OpticFlowRotation>>,
+    bbox: &'b GyroData,
+    angle: f64,
+    fps: f64,
+    video_ts: f64,
+    frames: usize,
+    center_bbox_ts: f64,
+    bbox_length: f64,
+) -> EstimatedOffset {
     let center_frame = (video_ts * fps).round() as usize;
     let of = {
         debug_time!("read_optic_flow_data");
-        read_optic_flow_data(&mut frame_rotation.lock().unwrap(), bbox.timestep, center_frame - frames / 2, frames)
+        read_optic_flow_data(
+            &mut frame_rotation.lock().unwrap(),
+            bbox.timestep,
+            center_frame - frames / 2,
+            frames,
+        )
     };
 
-    let bbox = bbox.subset(center_bbox_ts - bbox_length / 2.0, bbox_length).with_camera_angle(angle);
+    let bbox = bbox
+        .subset(center_bbox_ts - bbox_length / 2.0, bbox_length)
+        .with_camera_angle(angle);
 
     let (offset_s, cost) = {
         debug_time!("find_offset");
@@ -163,7 +215,7 @@ fn cross_similarity_error(a: &[f64], b: &[f64]) -> f64 {
     let mut sqr_sum = 0.0;
 
     for ix in 0..a.len() {
-        sqr_sum += (a[ix] - b[ix]).powi(2);
+        sqr_sum += (a[ix] - b[ix]).powi(2).min(1.0);
     }
 
     sqr_sum.sqrt()
@@ -174,14 +226,15 @@ fn find_offset(optic_flow: &OpticFlowData, gyro: &GyroData) -> (f64, f64) {
 
     let window_size = optic_flow.pitch.len();
     let scan_size = gyro.pitch.len() - window_size + 1;
-    
+
     let mut min_cost = f64::INFINITY;
     let mut best_offset = 0;
-    for offset in 0..scan_size  {
-        let cost = 
-            cross_similarity_error(&gyro.pitch[offset..offset+window_size], &optic_flow.pitch) +
-            cross_similarity_error(&gyro.yaw[offset..offset+window_size], &optic_flow.yaw) +
-            cross_similarity_error(&gyro.roll[offset..offset+window_size], &optic_flow.roll) * 2.0;
+    for offset in 0..scan_size {
+        let cost = 0.0
+            + cross_similarity_error(&gyro.pitch[offset..offset + window_size], &optic_flow.pitch)
+            + cross_similarity_error(&gyro.yaw[offset..offset + window_size], &optic_flow.yaw)
+            + cross_similarity_error(&gyro.roll[offset..offset + window_size], &optic_flow.roll)
+                * 2.0;
 
         if cost < min_cost {
             min_cost = cost;
@@ -189,5 +242,8 @@ fn find_offset(optic_flow: &OpticFlowData, gyro: &GyroData) -> (f64, f64) {
         }
     }
 
-    (gyro.time[best_offset] - optic_flow.start_time(), min_cost / window_size as f64)
+    (
+        gyro.time[best_offset] - optic_flow.start_time(),
+        min_cost / window_size as f64,
+    )
 }

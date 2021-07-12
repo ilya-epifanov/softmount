@@ -1,6 +1,10 @@
 use fc_blackbox::{BlackboxReader, BlackboxRecord};
-use itertools::izip;
+use itertools::{izip, Itertools};
 use nalgebra::{Rotation, Vector3};
+use rustfft::{
+    num_complex::{Complex, Complex32},
+    FftPlanner,
+};
 
 use crate::util::sliding_average;
 
@@ -18,7 +22,7 @@ impl GyroData {
     pub fn filtered(&self, window_size: usize) -> GyroData {
         GyroData {
             timestep: self.timestep,
-            time: self.time[window_size-1..].iter().copied().collect(),
+            time: self.time[window_size - 1..].iter().copied().collect(),
             pitch: sliding_average(&self.pitch, window_size),
             yaw: sliding_average(&self.yaw, window_size),
             roll: sliding_average(&self.roll, window_size),
@@ -46,7 +50,8 @@ impl GyroData {
         let mut yaw_adjusted = Vec::new();
         for (&roll, &pitch, &yaw) in izip!(&self.roll, &self.pitch, &self.yaw) {
             let rotation = Rotation::from_euler_angles(roll, pitch, yaw);
-            let (new_roll, new_pitch, new_yaw) = (adjust_after * rotation * adjust_before).euler_angles();
+            let (new_roll, new_pitch, new_yaw) =
+                (adjust_after * rotation * adjust_before).euler_angles();
             roll_adjusted.push(new_roll);
             pitch_adjusted.push(new_pitch);
             yaw_adjusted.push(new_yaw);
@@ -79,10 +84,70 @@ impl GyroData {
             Some(guess as usize)
         }
     }
-    
+
     pub fn len(&self) -> usize {
         self.time.len()
     }
+
+    pub fn good_angle_estimation_fragments(&self) -> Vec<f64> {
+        let loop_time = (1.0 / self.timestep).round() as usize;
+        assert!(loop_time >= 64);
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(loop_time);
+
+        let mut buffer = vec![
+            Complex {
+                re: 0.0f64,
+                im: 0.0f64
+            };
+            loop_time
+        ];
+        let mut scores = vec![];
+
+        for second in 0..self.end_time().floor() as usize {
+            for ix in 0..loop_time {
+                buffer[ix] = Complex {
+                    re: self.roll[second * loop_time + ix],
+                    im: 0.0,
+                };
+            }
+
+            fft.process(&mut buffer);
+
+            // 0..1 Hz ignore
+            // 1..(fps/2) region of interest
+            // (fps/2)..fps better be quiet
+            // fps.. ignore
+            // f_s = loop_time
+            // bin_width = 1Hz
+
+            let mut score = 0.0;
+            for freq in 1..16 {
+                score += buffer[freq].re;
+            }
+            for freq in 16..31 {
+                score -= buffer[freq].re * 0.5;
+            }
+            scores.push(score);
+        }
+
+        unimplemented!();
+    }
+}
+
+fn find_peak(data: &mut [f64], cutout_width: f64) -> (usize, f64) {
+    let max_ix = data
+        .iter()
+        .position_max_by(|a, b| PartialOrd::partial_cmp(*a, *b).unwrap())
+        .unwrap();
+    let max = data[max_ix];
+    // let
+    for ix in (max_ix - cutout_width as usize)..(max_ix - cutout_width as usize) {
+        let distance = (ix as isize - max_ix as isize) as f64;
+        // let
+    }
+
+    unimplemented!()
 }
 
 pub fn read_bbox_data(bbox: &mut BlackboxReader) -> GyroData {
@@ -92,7 +157,10 @@ pub fn read_bbox_data(bbox: &mut BlackboxReader) -> GyroData {
     let pitch_down_ix = bbox.header.ip_fields["gyroADC[1]"].ix;
     let yaw_left_ix = bbox.header.ip_fields["gyroADC[2]"].ix;
     let loop_time: u32 = bbox.header.loop_time;
-    let time_scale = 1.0 / loop_time as f64;
+    let pid_process_denom: u32 = bbox.header.other_headers["pid_process_denom"]
+        .parse()
+        .unwrap();
+    let time_scale = (loop_time * pid_process_denom) as f64 / 1_000_000.0;
 
     let gyro_scale = bbox.header.gyro_scale as f64 * 1_000_000.0; // TODO
 
@@ -107,7 +175,7 @@ pub fn read_bbox_data(bbox: &mut BlackboxReader) -> GyroData {
     let mut valid_intervals_sum = 0.0;
     let mut valid_intervals_qty = 0usize;
 
-    while let Some(record) = bbox.next() {
+    'read: while let Some(record) = bbox.next() {
         match record {
             BlackboxRecord::Main(values) => {
                 // let raw_time = values[time_ix] as i32 as u32;
@@ -127,7 +195,8 @@ pub fn read_bbox_data(bbox: &mut BlackboxReader) -> GyroData {
                     let expected_interval = valid_intervals_sum / valid_intervals_qty as f64;
                     let this_interval: f64 = time - last_time.unwrap();
                     if this_interval > expected_interval * 1.55 {
-                        let missed_frames = (this_interval / expected_interval).round() as usize - 1;
+                        let missed_frames =
+                            (this_interval / expected_interval).round() as usize - 1;
 
                         let mut fake_time = last_time.unwrap();
                         let mut fake_pitch = *gyro_pitch.last().unwrap();
@@ -175,9 +244,12 @@ pub fn read_bbox_data(bbox: &mut BlackboxReader) -> GyroData {
             BlackboxRecord::Garbage(length) => {
                 println!("Got {} bytes of garbage", length);
             }
+            BlackboxRecord::Event(fc_blackbox::frame::event::Frame::EndOfLog) => {
+                break 'read;
+            }
             _ => {}
         }
-    }            
+    }
 
     GyroData {
         timestep: valid_intervals_sum / valid_intervals_qty as f64,

@@ -1,16 +1,28 @@
 use std::{f64::consts::PI, fmt::Debug, ops::Range};
 
+use itertools::{izip, Itertools};
 use kv::{Bucket, Integer, Json};
-use serde::{Deserialize, Serialize};
-use nalgebra::{Point2, Rotation};
-use itertools::{Itertools, izip};
 use log::trace;
 use measure_time::*;
-use opencv::{core::{CV_32FC2, Point2f, Point2i, Scalar, Size2i, TermCriteria, TermCriteria_Type, no_array}, highgui::imshow, imgproc::{COLOR_BGR2GRAY, FONT_HERSHEY_SIMPLEX, INTER_AREA, LINE_8, LINE_AA, good_features_to_track}, prelude::{Mat, MatExprTrait, MatTrait, MatTraitManual}, video::calc_optical_flow_pyr_lk};
+use nalgebra::{Point2, Rotation};
+use opencv::{
+    core::{no_array, Point2f, Point2i, Scalar, Size2i, TermCriteria, TermCriteria_Type, CV_32FC2},
+    highgui::imshow,
+    imgproc::{
+        good_features_to_track, COLOR_BGR2GRAY, FONT_HERSHEY_SIMPLEX, INTER_AREA, LINE_8, LINE_AA,
+    },
+    prelude::{Mat, MatExprTrait, MatTrait, MatTraitManual},
+    video::calc_optical_flow_pyr_lk,
+};
+use serde::{Deserialize, Serialize};
 use statrs::statistics::Statistics;
 use thiserror::Error;
 
-use crate::{camera::{CameraError, Lens}, util::sliding_average, video_source::{VideoSource, VideoSourceError}};
+use crate::{
+    camera::{CameraError, Lens},
+    util::sliding_average,
+    video_source::{VideoSource, VideoSourceError},
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct OpticFlowPoint {
@@ -25,16 +37,17 @@ mod point_serde {
     use nalgebra::Point2;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S>(
-        point: &Point2<f32>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> where S: Serializer {
+    pub fn serialize<S>(point: &Point2<f32>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
         (point.coords.x, point.coords.y).serialize(serializer)
     }
 
-    pub fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<Point2<f32>, D::Error> where D: Deserializer<'de> {
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Point2<f32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
         let coords: (f32, f32) = Deserialize::deserialize(deserializer)?;
         Ok(Point2::new(coords.0, coords.1))
     }
@@ -52,9 +65,7 @@ impl FrameOpticFlow {
         let errors = points.iter().map(|p| p.error as f64);
         let rms_error = Statistics::quadratic_mean(errors.clone());
 
-        Self {
-            points, rms_error
-        }
+        Self { points, rms_error }
     }
 
     // pub fn good_points(&self) -> Vec<usize> {
@@ -63,11 +74,11 @@ impl FrameOpticFlow {
     //     let mut distances = self.points.iter().map(|p| p.distance() ).collect_vec();
     //     distances.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     //     let distance_median = distances[distances.len() / 2];
-        
+
     //     let distance_threshold = distance_median.min(10.0);
 
     //     for (ix, distance) in distances.iter().copied().enumerate() {
-    //         if distance >= distance_threshold { 
+    //         if distance >= distance_threshold {
     //             good_points.push(ix);
     //         }
     //     }
@@ -76,20 +87,28 @@ impl FrameOpticFlow {
     // }
 
     pub fn prev_points(&self) -> Mat {
-        let mut prev_points = Mat::zeros(self.points.len() as i32, 1, CV_32FC2).unwrap().to_mat().unwrap();
+        let mut prev_points = Mat::zeros(self.points.len() as i32, 1, CV_32FC2)
+            .unwrap()
+            .to_mat()
+            .unwrap();
 
         for (ix, point) in self.points.iter().enumerate() {
-            *prev_points.at_mut(ix as i32).unwrap() = Point2f::new(point.prev.coords.x, point.prev.coords.y);
+            *prev_points.at_mut(ix as i32).unwrap() =
+                Point2f::new(point.prev.coords.x, point.prev.coords.y);
         }
 
         prev_points
     }
 
     pub fn curr_points(&self) -> Mat {
-        let mut curr_points = Mat::zeros(self.points.len() as i32, 1, CV_32FC2).unwrap().to_mat().unwrap();
+        let mut curr_points = Mat::zeros(self.points.len() as i32, 1, CV_32FC2)
+            .unwrap()
+            .to_mat()
+            .unwrap();
 
         for (ix, point) in self.points.iter().enumerate() {
-            *curr_points.at_mut(ix as i32).unwrap() = Point2f::new(point.curr.coords.x, point.curr.coords.y);
+            *curr_points.at_mut(ix as i32).unwrap() =
+                Point2f::new(point.curr.coords.x, point.curr.coords.y);
         }
 
         curr_points
@@ -274,7 +293,8 @@ impl Retracker {
     }
 
     pub fn got_pose(&mut self, pose: &FramePose) {
-        let quality = (pose.points_used - self.min_quality_at_pts_used) as f64 / (self.max_quality_at_pts_used - self.min_quality_at_pts_used) as f64;
+        let quality = (pose.points_used - self.min_quality_at_pts_used) as f64
+            / (self.max_quality_at_pts_used - self.min_quality_at_pts_used) as f64;
         let quality = quality.clamp(0.0, 1.0);
         self.current_quality *= quality;
 
@@ -304,8 +324,13 @@ pub struct OpticFlowRotation<'cache> {
     cache: Bucket<'cache, Integer, Json<FrameRotation>>,
 }
 
-impl <'cache> OpticFlowRotation<'cache> {
-    pub fn new(src: VideoSource, lens: Lens, debug: Option<DebugOptions>, cache: Bucket<'cache, Integer, Json<FrameRotation>>) -> Self {
+impl<'cache> OpticFlowRotation<'cache> {
+    pub fn new(
+        src: VideoSource,
+        lens: Lens,
+        debug: Option<DebugOptions>,
+        cache: Bucket<'cache, Integer, Json<FrameRotation>>,
+    ) -> Self {
         let mut frames = vec![None; src.frame_count().max(1) - 1];
         for item in cache.iter() {
             let item = item.unwrap();
@@ -315,32 +340,49 @@ impl <'cache> OpticFlowRotation<'cache> {
             frames[k] = Some(v);
         }
 
-        Self { src, lens, frames, debug, cache }
+        Self {
+            src,
+            lens,
+            frames,
+            debug,
+            cache,
+        }
     }
 
-    pub fn recalc_for_ix_range_if_needed(&mut self, ix_range: Range<usize>) -> Result<(), OpticFlowRotationError> {
+    pub fn recalc_for_ix_range_if_needed(
+        &mut self,
+        ix_range: Range<usize>,
+    ) -> Result<(), OpticFlowRotationError> {
         let mut ix_range = ix_range;
         ix_range.end = ix_range.end.min(self.frames.len());
 
         let mut ranges_to_recalc = vec![];
-        for (missing, frames) in &self.frames[ix_range.clone()].iter().copied().zip(ix_range).group_by(|(r, _ix)| r.is_none()) {
+        for (missing, frames) in &self.frames[ix_range.clone()]
+            .iter()
+            .copied()
+            .zip(ix_range)
+            .group_by(|(r, _ix)| r.is_none())
+        {
             if missing {
                 let mut frames = frames.into_iter();
                 let first_frame_ix = frames.next().unwrap().1;
                 let last_frame_ix = frames.last().map(|(_, ix)| ix).unwrap_or(first_frame_ix);
 
-                ranges_to_recalc.push(first_frame_ix..last_frame_ix+1);
+                ranges_to_recalc.push(first_frame_ix..last_frame_ix + 1);
             }
         }
 
         for range_to_recalc in ranges_to_recalc {
             self.recalc_for_ix_range(range_to_recalc)?;
         }
-        
+
         Ok(())
     }
 
-    pub fn recalc_for_ix_range(&mut self, ix_range: Range<usize>) -> Result<(), OpticFlowRotationError> {
+    pub fn recalc_for_ix_range(
+        &mut self,
+        ix_range: Range<usize>,
+    ) -> Result<(), OpticFlowRotationError> {
         let mut retracker = Retracker::default();
         let mut ix_range = ix_range;
         ix_range.end = ix_range.end.min(self.frames.len());
@@ -389,8 +431,14 @@ impl <'cache> OpticFlowRotation<'cache> {
             let mut debug_output = Mat::default();
             if let Some(debug) = &self.debug {
                 debug_time!("(debug_output) resize");
-                opencv::imgproc::resize(&src_frame, &mut debug_output, 
-                Size2i::new(0, 0), debug.scale as f64, debug.scale as f64, INTER_AREA)?;
+                opencv::imgproc::resize(
+                    &src_frame,
+                    &mut debug_output,
+                    Size2i::new(0, 0),
+                    debug.scale as f64,
+                    debug.scale as f64,
+                    INTER_AREA,
+                )?;
             }
 
             for attempt in 0..2 {
@@ -404,13 +452,14 @@ impl <'cache> OpticFlowRotation<'cache> {
                         prev_frame,
                         &mut prev_points,
                         300,
-                        0.05,
-                        50.0,
+                        0.01,
+                        30.0,
                         &no_array()?,
-                        5,
+                        3,
                         false,
                         0.04,
-                    ).map_err(OpticFlowRotationError::GoodFeaturesToTrack)?;
+                    )
+                    .map_err(OpticFlowRotationError::GoodFeaturesToTrack)?;
                     retracker.retracking();
                 } else {
                     prev_points.clone_from(&curr_points);
@@ -425,8 +474,8 @@ impl <'cache> OpticFlowRotation<'cache> {
                         &mut curr_points,
                         &mut point_status,
                         &mut point_errors,
-                        Size2i::new(21, 21),
-                        3,
+                        Size2i::new(25, 25),
+                        5,
                         TermCriteria::new(
                             TermCriteria_Type::COUNT as i32 + TermCriteria_Type::EPS as i32,
                             30,
@@ -481,11 +530,21 @@ impl <'cache> OpticFlowRotation<'cache> {
                     }
 
                     if let Some(debug) = &self.debug {
-                        opencv::imgproc::line(&mut debug_output, 
-                            Point2i::new((prev.coords.x * debug.scale) as i32, (prev.coords.y * debug.scale) as i32),
-                            Point2i::new((curr.coords.x * debug.scale) as i32, (curr.coords.y * debug.scale) as i32),
+                        opencv::imgproc::line(
+                            &mut debug_output,
+                            Point2i::new(
+                                (prev.coords.x * debug.scale) as i32,
+                                (prev.coords.y * debug.scale) as i32,
+                            ),
+                            Point2i::new(
+                                (curr.coords.x * debug.scale) as i32,
+                                (curr.coords.y * debug.scale) as i32,
+                            ),
                             Scalar::new(0.0, 0.0, 255.0, 255.0),
-                            3 as i32, LINE_8, 0)?;
+                            3 as i32,
+                            LINE_8,
+                            0,
+                        )?;
                     }
 
                     let point = OpticFlowPoint {
@@ -506,7 +565,11 @@ impl <'cache> OpticFlowRotation<'cache> {
 
                 let pose = {
                     debug_time!("recover_rotation");
-                    if let Ok(pose) = self.lens.recover_rotation(&frame_optic_flow).map_err(OpticFlowRotationError::Camera) {
+                    if let Ok(pose) = self
+                        .lens
+                        .recover_rotation(&frame_optic_flow)
+                        .map_err(OpticFlowRotationError::Camera)
+                    {
                         pose
                     } else {
                         let frame_rotation = FrameRotation {
@@ -518,7 +581,7 @@ impl <'cache> OpticFlowRotation<'cache> {
                         };
                         self.cache.set(ix, Json(frame_rotation)).unwrap();
                         self.frames[ix] = Some(frame_rotation);
-        
+
                         retracker.force_retrack_next();
                         continue 'next_frame;
                     }
@@ -550,21 +613,41 @@ impl <'cache> OpticFlowRotation<'cache> {
                 if let Some(_) = &self.debug {
                     debug_time!("(debug_output) undistort_image + imshow");
                     let mut undistorted = self.lens.undistort_image(&debug_output).unwrap();
-                    opencv::imgproc::put_text(&mut undistorted, 
-                        &format!("R: {:+03.2}deg/s", roll * 180.0 / PI), 
-                        Point2i::new(0, 100), FONT_HERSHEY_SIMPLEX, 1.0, Scalar::new(255.0, 0.0, 0.0, 255.0),
-                        2, LINE_AA, false)?;
-                    opencv::imgproc::put_text(&mut undistorted, 
-                        &format!("P: {:+03.2}deg/s", pitch * 180.0 / PI), 
-                        Point2i::new(0, 150), FONT_HERSHEY_SIMPLEX, 1.0, Scalar::new(255.0, 0.0, 0.0, 255.0),
-                        2, LINE_AA, false)?;
-                    opencv::imgproc::put_text(&mut undistorted, 
+                    opencv::imgproc::put_text(
+                        &mut undistorted,
+                        &format!("R: {:+03.2}deg/s", roll * 180.0 / PI),
+                        Point2i::new(0, 100),
+                        FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        Scalar::new(255.0, 0.0, 0.0, 255.0),
+                        2,
+                        LINE_AA,
+                        false,
+                    )?;
+                    opencv::imgproc::put_text(
+                        &mut undistorted,
+                        &format!("P: {:+03.2}deg/s", pitch * 180.0 / PI),
+                        Point2i::new(0, 150),
+                        FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        Scalar::new(255.0, 0.0, 0.0, 255.0),
+                        2,
+                        LINE_AA,
+                        false,
+                    )?;
+                    opencv::imgproc::put_text(
+                        &mut undistorted,
                         &format!("Y: {:+03.2}deg/s", yaw * 180.0 / PI),
-                        Point2i::new(0, 200), FONT_HERSHEY_SIMPLEX, 1.0, Scalar::new(255.0, 0.0, 0.0, 255.0),
-                        2, LINE_AA, false)?;
+                        Point2i::new(0, 200),
+                        FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        Scalar::new(255.0, 0.0, 0.0, 255.0),
+                        2,
+                        LINE_AA,
+                        false,
+                    )?;
                     imshow("frame", &undistorted)?;
                 }
-
 
                 break;
             }
@@ -595,7 +678,7 @@ impl OpticFlowData {
     pub fn filtered(&self, window_size: usize) -> OpticFlowData {
         OpticFlowData {
             timestep: self.timestep,
-            time: self.time[window_size-1..].iter().copied().collect(),
+            time: self.time[window_size - 1..].iter().copied().collect(),
             pitch: sliding_average(&self.pitch, window_size),
             yaw: sliding_average(&self.yaw, window_size),
             roll: sliding_average(&self.roll, window_size),
@@ -607,10 +690,17 @@ impl OpticFlowData {
     }
 }
 
-pub fn read_optic_flow_data(video: &mut OpticFlowRotation, timestep: f64, start_frame: usize, frames: usize) -> OpticFlowData {
+pub fn read_optic_flow_data(
+    video: &mut OpticFlowRotation,
+    timestep: f64,
+    start_frame: usize,
+    frames: usize,
+) -> OpticFlowData {
     let frames = frames.min(video.len() - start_frame);
 
-    video.recalc_for_ix_range_if_needed(start_frame..start_frame+frames).unwrap();
+    video
+        .recalc_for_ix_range_if_needed(start_frame..start_frame + frames)
+        .unwrap();
     let mut last_frame = video.get_by_ix(start_frame).unwrap();
 
     let mut of_time = Vec::new();
@@ -623,8 +713,8 @@ pub fn read_optic_flow_data(video: &mut OpticFlowRotation, timestep: f64, start_
     of_roll.push(last_frame.roll);
 
     let mut timestep_carry = 0.0;
-    
-    for ix in start_frame+1..(start_frame + frames) {
+
+    for ix in start_frame + 1..(start_frame + frames) {
         let mut curr_frame = video.get_by_ix(ix).expect(&format!("video frame {}", ix));
 
         let actual_timestep = curr_frame.time - last_frame.time;
@@ -670,4 +760,3 @@ pub fn read_optic_flow_data(video: &mut OpticFlowRotation, timestep: f64, start_
         roll: of_roll,
     }
 }
-

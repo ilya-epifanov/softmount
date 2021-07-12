@@ -10,9 +10,15 @@ pub fn opencv_to_matrix3x3(mat: &Mat) -> Matrix3<f64> {
     assert_eq!(mat.cols(), 3);
 
     Matrix3::new(
-        *mat.at_2d(0, 0).unwrap(), *mat.at_2d(0, 1).unwrap(), *mat.at_2d(0, 2).unwrap(), 
-        *mat.at_2d(1, 0).unwrap(), *mat.at_2d(1, 1).unwrap(), *mat.at_2d(1, 2).unwrap(), 
-        *mat.at_2d(2, 0).unwrap(), *mat.at_2d(2, 1).unwrap(), *mat.at_2d(2, 2).unwrap(),
+        *mat.at_2d(0, 0).unwrap(),
+        *mat.at_2d(0, 1).unwrap(),
+        *mat.at_2d(0, 2).unwrap(),
+        *mat.at_2d(1, 0).unwrap(),
+        *mat.at_2d(1, 1).unwrap(),
+        *mat.at_2d(1, 2).unwrap(),
+        *mat.at_2d(2, 0).unwrap(),
+        *mat.at_2d(2, 1).unwrap(),
+        *mat.at_2d(2, 2).unwrap(),
     )
 }
 
@@ -22,7 +28,9 @@ pub fn opencv_to_vector3(mat: &Mat) -> Vector3<f64> {
     assert_eq!(mat.cols(), 1);
 
     Vector3::new(
-        *mat.at_2d(0, 0).unwrap(), *mat.at_2d(1, 0).unwrap(), *mat.at_2d(2, 0).unwrap(), 
+        *mat.at_2d(0, 0).unwrap(),
+        *mat.at_2d(1, 0).unwrap(),
+        *mat.at_2d(2, 0).unwrap(),
     )
 }
 
@@ -72,9 +80,19 @@ pub fn sliding_average(v: &[f64], window_size: usize) -> Vec<f64> {
     ret
 }
 
-pub fn ransac<T: Default + Copy, ScoreModel, const N: usize>(vs: &[T], inlier_prob: f64, confidence: f64, score_model: ScoreModel) -> Vec<bool> where ScoreModel: Fn([T; N], &[T], &mut [bool]) -> f64 {
+pub fn ransac<T: Default + Copy, ScoreModel, const N: usize>(
+    vs: &[T],
+    inlier_prob: f64,
+    confidence: f64,
+    score_model: ScoreModel,
+) -> Vec<bool>
+where
+    ScoreModel: Fn([T; N], &[T], &mut [bool]) -> f64,
+{
     let good_sample_prob = inlier_prob.powi(N as i32);
-    let attempts = ((1.0 - confidence).ln() / (1.0 - good_sample_prob).ln() + 3.0 * (1.0 - good_sample_prob).sqrt() / good_sample_prob).ceil() as usize;
+    let attempts = ((1.0 - confidence).ln() / (1.0 - good_sample_prob).ln()
+        + 3.0 * (1.0 - good_sample_prob).sqrt() / good_sample_prob)
+        .ceil() as usize;
 
     let mut rng = rand::thread_rng();
 
@@ -85,7 +103,13 @@ pub fn ransac<T: Default + Copy, ScoreModel, const N: usize>(vs: &[T], inlier_pr
     for _ in 0..attempts {
         let mut values = [T::default(); N];
 
-        for (v_ix, (ix, _v)) in vs.iter().enumerate().choose_multiple(&mut rng, N).into_iter().enumerate() {
+        for (v_ix, (ix, _v)) in vs
+            .iter()
+            .enumerate()
+            .choose_multiple(&mut rng, N)
+            .into_iter()
+            .enumerate()
+        {
             values[v_ix] = vs[ix];
         }
 
@@ -99,4 +123,3 @@ pub fn ransac<T: Default + Copy, ScoreModel, const N: usize>(vs: &[T], inlier_pr
 
     best_inliers
 }
-
